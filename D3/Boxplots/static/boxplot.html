@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body { margin: 0; font-family: sans-serif; }
+    </style>
+</head>
+<body>
+    <div id="chart"></div>
+    <div id="tooltip" style="position: absolute; opacity: 0;
+         pointer-events: none; background: white; border: 1px solid #ccc;
+         padding: 5px; border-radius: 4px; font-size: 12px;">
+    </div>
+    <script>
+        /**
+         * processes data, creates and renders boxplot
+         * @param {Array} gruppen - list of all groups and its data delivered by read_json -> generate_boxplot
+         * @returns {Object} SVG-object, width, height, y-axis scale, point_group of outliers */
+        function renderChart(gruppen) {
+
+            // ========== Plot area setup ==========
+            // calculation of width, height of plot area considering margin
+            var margin = CONFIG.margin,
+                width = CONFIG.width - margin.left - margin.right,
+                height = CONFIG.height - margin.top - margin.bottom;
+
+            // initialization of plot area as an svg with defined size
+            var svg_properties = d3.select("#chart")
+                .append("svg")
+                .attr("width", width + margin.left + margin.right)
+                .attr("height", height + margin.top + margin.bottom);
+
+            // clip-path to restrict drawing to the plot area to keep elements inside during zoom
+            svg_properties
+                .append("defs")
+                .append("clipPath")
+                .attr("id", "clip")
+                .append("rect")
+                .attr("width", width)
+                .attr("height", height);
+
+            // group content with a clipping mask and apply margins
+            var svg_group = svg_properties.append("g")
+                .attr("class", "chart-content")
+                .attr("clip-path", "url(#clip)")
+                .attr("transform", "translate(" + margin.left + "," + margin.top + ")");
+
+            // separate group for outliers to handle their zoom behavior independently
+            var point_group = svg_properties.append("g")
+                .attr("class", "point-content")
+                .attr("clip-path", "url(#clip)"); // clip-path, so that outliers are not printed underneath x-axis
+
+
+            // creation of an array containing gathered data of all groups, so that all groups
+            // can be plotted in the diagram
+            var allValues = [].concat(...gruppen.map(g => g.werte));
+
+
+            // ========== Axes setup ==========
+
+            // definition of the x-axis scale using group names as x-labels and set spacing between group names
+            var x = d3.scaleBand()
+                .domain(gruppen.map(g => g.name))
+                .range([0, width])
+                .padding(0.4);
+
+            // definition of the Y-axis scale and mapping data range to pixel height, which
+            // is also important when zooming
+            var y = d3.scaleLinear()
+                .domain([d3.min(allValues) - 2, d3.max(allValues) + 2])
+                .range([height, 0]);
+
+            // separate x-axis group, on which a specific zoom behaviour gets applied later on
+            var xAxisGroup = svg_properties
+                .append("g")
+                .attr("class", "x-axis")
+                .attr("transform", "translate(" + margin.left + "," + (height + margin.top) + ")");
+
+            // separate y-axis group, on which a specific zoom behaviour gets applied later on
+            var yAxisGroup = svg_properties
+                .append("g")
+                .attr("class", "y-axis")
+                .attr("transform", "translate(" + margin.left + "," + margin.top + ")");
+
+            // rendering axes based on the previously defined scales
+            xAxisGroup.call(d3.axisBottom(x));
+            yAxisGroup.call(d3.axisLeft(y));
+
+
+            // ========== Calculation loop ==========
+            // iterating through all data groups to calculate specific values
+            gruppen.forEach((group_data, i) => {
+                var data = group_data.werte.sort(d3.ascending);
+
+                // calculate center and width of the band to position the boxplot correctly centered
+                //  in the diagram area
+                var center = x(group_data.name) + x.bandwidth() / 2;
+                var boxWidth = x.bandwidth();
+
+                // calculation of standard values
+                var q1 = d3.quantile(data, .25);
+                var median = d3.quantile(data, .5);
+                var q3 = d3.quantile(data, .75);
+                var interQuantileRange = q3 - q1;
+
+                // define min and max value, which is not an outlier (and contains to whisker area)
+                var min = q1 - CONFIG.WhiskerFactor * interQuantileRange;
+                var max = q3 + CONFIG.WhiskerFactor * interQuantileRange;
+
+                // Determine the whiskers' range by finding the extreme values within the non-outlier bounds
+                var whiskerMin = d3.min(data.filter(d => d >= min));
+                var whiskerMax = d3.max(data.filter(d => d <= max));
+
+                // outliers out of whiskers' range
+                var outliers = data.filter(d => d < min || d > max);
+
+                // create data objects containing outliers' group name and value, so that
+                // they can be rendered when hovering over an outlier
+                var outlierObjects = outliers.map(val => ({
+                    value: val,
+                    groupName: group_data.name
+                }));
+
+                // ========== Rendering part ===========
+                // draw the vertical whisker line (extreme non-outlier values)
+                svg_group.append("line").attr("class", "element whisker-vert")
+                    .datum({ y1: whiskerMin, y2: whiskerMax }) // HIER: Datum hinzugefügt
+                    .attr("x1", center).attr("x2", center)
+                    .attr("y1", y(whiskerMin)).attr("y2", y(whiskerMax))
+                    .attr("stroke", "black");
+
+                // draw the box
+                svg_group.append("rect").attr("class", "element box-rect")
+                    .datum({ q1: q1, q3: q3 }) // Das hattest du schon korrekt
+                    .attr("x", center - boxWidth / 2).attr("y", y(q3))
+                    .attr("height", Math.abs(y(q1) - y(q3))).attr("width", boxWidth)
+                    .attr("stroke", "black").style("fill", "#69b3a2")
+                    // handle tooltip interactions for outlier details on mouse hover
+                    .on("mouseover", function(event) {
+                        d3.select("#tooltip")
+                            .style("opacity", 1)
+                            .html(`Gruppe: ${group_data.name}<br>
+                            Q1: ${q1.toFixed(2)}<br>
+                            Median: ${median.toFixed(2)}<br>
+                            Q3: ${q3.toFixed(2)} <br>
+                            Oberer Whisker: ${whiskerMax.toFixed(2)}<br>
+                            Unterer Whisker: ${whiskerMin.toFixed(2)}<br>`)
+                    })
+                    // update tooltip position dynamically based on mouse movement with a slight offset
+                    .on("mousemove", function (event) {
+                        d3.select("#tooltip")
+                            .style("left", (event.pageX + CONFIG.tooltipOffsetX) + "px")
+                            .style("top", (event.pageY - CONFIG.tooltipOffsetY) + "px");
+                    })
+                    // hide tooltip when outlier when not hovering over outlier anymore
+                    .on("mouseout", function () {
+                        d3.select("#tooltip").style("opacity", 0);
+                    });
+
+                // draw horizontal lines in the Box (Min, Median, Max)
+                svg_group.selectAll("lines").data([whiskerMin, median, whiskerMax]).enter()
+                    .append("line").attr("class", "element whisker-horiz")
+                    .attr("x1", center - boxWidth / 2).attr("x2", center + boxWidth / 2)
+                    .attr("y1", d => y(d)).attr("y2", d => y(d)).attr("stroke", "black")
+
+
+                // Render outliers as individual points in a separate group to prevent
+                // zoom-induced distortion caused by Y-axis zooming
+                // (damit outlier-Punkte nicht durch den ausschließlichen Zoom in y-Richtung verzerrt werden)
+                point_group.selectAll("outliers-" + i)
+                    .data(outlierObjects)
+                    .enter()
+                    .append("circle")
+                    .attr("class", "outlier-point")
+                    // position points based on group center and Y-scale
+                    .attr("cx", center + margin.left)
+                    .attr("cy", d => y(d) + margin.top)
+                    .attr("r", 3)
+                    .attr("fill", "red")
+                    // handle tooltip interactions for outlier details on mouse hover
+                    .on("mouseover", function (event, d) {
+                        d3.select("#tooltip")
+                            .style("opacity", 1)
+                            .html(`Gruppe: ${d.groupName}<br>Wert: ${d.value.toFixed(2)}`);
+                    })
+                    // update tooltip position dynamically based on mouse movement with a slight offset
+                    .on("mousemove", function (event) {
+                        d3.select("#tooltip")
+                            .style("left", (event.pageX + 10) + "px")
+                            .style("top", (event.pageY - 20) + "px");
+                    })
+                    // hide tooltip when outlier when not hovering over outlier anymore
+                    .on("mouseout", function () {
+                        d3.select("#tooltip").style("opacity", 0);
+                    });
+            });
+            return {svg: svg_properties, width, height, y, point_group: point_group};
+        }
+
+        /**
+         * implements y-axis zoom when user scrolls the mouse wheel
+         * @param {Object} svg - main svg object
+         * @param {Number} width - width of the chart
+         * @param {Number} height - height of the chart
+         * @param {Function} y - y-axis scale function
+         * @param {Object} margin - margin configuration object of left and top margin
+         * @param {Object} point_group - SVG group containing outlier points
+         */
+        function zoomInChart(svg, width, height, y, margin, point_group) {
+            // group containing all the data to plot (values)
+            const gContent = svg.select(".chart-content");
+            // y-axis group
+            const gYAxis = svg.select(".y-axis");
+
+            const zoom = d3.zoom()
+                // ([<min_zoom_factor, max_zoom_factor])
+                .scaleExtent(CONFIG.scaleFactors)
+                // select event triggering zoom
+                .filter((event) => event.type === 'wheel')
+                .on("zoom", (event) => {
+                    // access the current transformation matrix (includes scale and translation)
+                    const transform = event.transform;
+                    // scaling factor (k is the standard identifier for the zoom factor in D3)
+                    const k = transform.k;
+
+                    // update the y-axis scale based on the zoom transformation and redraw the axis
+                    const newY = transform.rescaleY(y);
+                    gYAxis.call(d3.axisLeft(newY));
+
+                    // Apply zoom transformation to the content group:
+                    // update y-coordinates of the boxplot components using newY
+                    gContent.selectAll(".whisker-vert")
+                        .attr("y1", d => newY(d.y1))
+                        .attr("y2", d => newY(d.y2));
+
+                    gContent.selectAll(".box-rect")
+                        .attr("y", d => newY(d.q3))
+                        .attr("height", d => Math.abs(newY(d.q1) - newY(d.q3)));
+
+                    gContent.selectAll(".whisker-horiz")
+                        .attr("y1", d => newY(d))
+                        .attr("y2", d => newY(d));
+
+                    // increase radius of outlier points to a fix value, if they would get too small when zooming
+                    point_group.selectAll(".outlier-point")
+                        .attr("cy", d => newY(d.value) + margin.top)
+                        .attr("r", k > 3 ? 4 : 3);
+
+                    // apply non-scaling-stroke to prevent line thickness from changing during zoom transformations
+                    gContent.selectAll(".element").attr("vector-effect", "non-scaling-stroke");
+                });
+
+            svg.call(zoom);
+        }
+
+        /**
+         * initial rendering of outliers when reloading / first loading page, otherwise they would first be rendered,
+         * when zoom function is called ones
+         * @param {Function} newY - the current Y-axis scale
+         * @param {Object} point_group - the SVG group, which contains outlier points
+         * @param {Object} margin - the margin configuration object
+         */
+        function printOutliersBeforeFirstZoom(newY, point_group, margin) {
+            point_group.selectAll(".outlier-point")
+                .attr("cy", d => newY(d.value) + margin.top);
+        }
+
+        // check, if data, which gets injected by inject_data_into_html() is loaded correctly
+        if (typeof chartData !== 'undefined') {
+            const chartObjects = renderChart(chartData);
+            printOutliersBeforeFirstZoom(chartObjects.y, chartObjects.point_group, CONFIG.marginOutliersBeforeFirstZoom);
+            zoomInChart(chartObjects.svg, chartObjects.width, chartObjects.height, chartObjects.y, CONFIG.marginZoomInChart, chartObjects.point_group);
+        }
+    </script>
+</body>
+</html>
